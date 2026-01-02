@@ -1,0 +1,15 @@
+{
+  "name": "diamante-automation",
+  "version": "1.0.0",
+  "description": "Diamante Testnet Automation Bot",
+  "main": "diam.mjs",
+  "type": "module",
+  "scripts": {
+    "start": "node diam.mjs"
+  },
+  "dependencies": {
+    "blessed": "^0.1.81",
+    "chalk": "^5.3.0",
+    "ethers": "^6.13.2"
+  }
+}
