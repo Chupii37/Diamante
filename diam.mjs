@@ -153,7 +153,6 @@ function callDiamanteAPI(url, method, payload, headers, proxy) {
     });
 }
 
-
 class DiamanteBot {
     constructor(address, proxy = null, id) {
         this.address = getAddress(address);
@@ -283,20 +282,33 @@ class DiamanteBot {
     }
 
     async updateBalance() {
+        if (!this.userId) {
+            this.addLog("Skip Balance: No User ID", "error");
+            return;
+        }
+
         const url = `${API_BASE_URL}/transaction/get-balance/${this.userId}`;
         const proxyArg = this.proxy ? this.proxy.url : "";
         
         for(let i=0; i<3; i++) {
             try {
                 const balRes = await callDiamanteAPI(url, "GET", null, this.getHeaders(), proxyArg);
+                
                 if (balRes.json && balRes.json.success) {
                     const newBal = Number(balRes.json.data.balance).toFixed(2);
                     this.balance = newBal;
                     this.addLog(`Balance: ${this.balance} DIAM`, 'info');
                     this.refreshDisplay();
                     return;
+                } else {
+                    if (i === 2) { 
+                        const msg = balRes.json?.message || `Status ${balRes.status_code}`;
+                        this.addLog(`Get Balance Fail: ${msg}`, 'warn');
+                    }
                 }
-            } catch(e) {}
+            } catch(e) {
+                if (i === 2) this.addLog(`Balance Err: ${e.message}`, 'error');
+            }
             await new Promise(r => setTimeout(r, 2000));
         }
     }
@@ -326,6 +338,7 @@ class DiamanteBot {
 
         const payload = {
             address: this.address,
+            walletAddress: this.address, 
             deviceId: this.deviceId,
             deviceSource: "web_app",
             deviceType: "Windows",
@@ -343,40 +356,48 @@ class DiamanteBot {
         };
 
         const proxyArg = this.proxy ? this.proxy.url : "";
-        const res = await callCurlCffi(payload, proxyArg, "chrome120");
+        const res = await callCurlCffi(payload, proxyArg);
 
-        if (res.status_code === 403) {
-            this.addLog('Login Blocked (403). Cooldown 60s.', 'error');
+        if (res.status_code === 403 || res.text === "CLOUDFLARE_BLOCKED_ME") {
+            this.addLog('Login: 403 Blocked (Network)', 'error');
             this.updateStatus('403 Blocked');
             await this.smartSleep(60, 65, "403 Cooldown");
             return false;
         }
 
-        const data = res.json?.data || res.json;
-        if (!data) {
-            this.addLog(`Login Failed: ${res.text ? res.text.slice(0, 50) : "No Data"}`, 'error');
-            return false;
-        }
-
+        const data = res.json?.data || res.json || {};
+        
         let token = data.accessToken;
-        if (!token && res.headers && res.headers["set-cookie"]) {
-            const sc = Array.isArray(res.headers["set-cookie"]) ? res.headers["set-cookie"][0] : res.headers["set-cookie"];
-            const match = sc.match(/access_token=([^;]+)/);
-            if (match) token = match[1];
+        
+        if (!token && res.headers) {
+            const setCookie = res.headers["set-cookie"] || res.headers["Set-Cookie"];
+            if (setCookie) {
+                const cookieStr = Array.isArray(setCookie) ? setCookie.join(";") : setCookie;
+                const match = cookieStr.match(/access_token=([^;]+)/);
+                if (match) {
+                    token = match[1];
+                    this.addLog("Token found in Cookies!", "debug");
+                }
+            }
         }
 
         if (!token) {
-            this.addLog('No access token found.', 'error');
+            const msg = res.json?.message || "No Token";
+            this.addLog(`Login Fail: ${msg}`, 'error');
             return false;
         }
 
         this.accessToken = token;
-        this.userId = data.userId || (data.user && data.user.userId);
 
-        if (data.isSocialExists !== "VERIFIED") {
-            this.addLog('Account not registered!', 'error');
-            this.updateStatus('Not Registered');
+        this.userId = data.userId || (data.user && data.user.userId) || (data.user && data.user._id) || data._id;
+
+        if (!this.userId) {
+            this.addLog("Login Error: Token OK but UserId MISSING!", "error");
+            this.addLog("Resp Data: " + JSON.stringify(data).slice(0, 50), "debug");
             return false;
+        }
+
+        if (data.isSocialExists !== "VERIFIED" && data.user?.isSocialExists !== "VERIFIED") {
         }
 
         this.addLog('Login Successful', 'success');
@@ -415,39 +436,47 @@ class DiamanteBot {
         await this.smartSleep(30, 60, "Pre-Faucet");
         this.addLog('Checking Faucet...', 'debug');
         
-        const faucetUrl = `${API_BASE_URL}/transaction/fund-wallet/${this.userId}`;
-        const faucetRes = await callDiamanteAPI(faucetUrl, "GET", null, this.getHeaders(), proxyArg);
-        
-        if (faucetRes.status_code === 403) {
-            this.addLog("Faucet 403. Cooling down...", "error");
-            await this.smartSleep(60, 70, "403 Cooldown");
-            this.faucetClaimed = false; 
-        } else if (faucetRes.json && faucetRes.json.success) {
-            this.addLog(`Faucet: +${faucetRes.json.data.fundedAmount} DIAM`, 'success');
-            this.faucetClaimed = true; 
-            
-            this.lastClaimTime = Date.now();
-            if(accountData[this.address.toLowerCase()]) {
-                accountData[this.address.toLowerCase()].lastClaimTime = this.lastClaimTime;
-                saveAccountData();
-            }
-
-            await this.updateBalance();
+        if (!this.userId) {
+             this.addLog("Faucet Skip: No User ID", "error");
         } else {
-            const msg = faucetRes.json?.message || `Status ${faucetRes.status_code}`;
-            if(msg && msg.includes("once per day")) {
-                this.addLog("Faucet already claimed today.", "warn");
-                this.faucetClaimed = true; 
-                if (!this.lastClaimTime || this.lastClaimTime === 0) {
-                      this.lastClaimTime = Date.now();
-                      if(accountData[this.address.toLowerCase()]) {
-                        accountData[this.address.toLowerCase()].lastClaimTime = this.lastClaimTime;
-                        saveAccountData();
-                    }
-                }
-            } else {
-                this.addLog(`Faucet: ${msg}`, 'warn');
+            const faucetUrl = `${API_BASE_URL}/transaction/fund-wallet/${this.userId}`;
+            const faucetRes = await callDiamanteAPI(faucetUrl, "GET", null, this.getHeaders(), proxyArg);
+            
+            if (faucetRes.status_code === 403) {
+                this.addLog("Faucet 403. Cooling down...", "error");
+                await this.smartSleep(60, 70, "403 Cooldown");
                 this.faucetClaimed = false; 
+            } else if (faucetRes.json && faucetRes.json.success) {
+                const amount = (faucetRes.json.data && faucetRes.json.data.fundedAmount) 
+                               ? faucetRes.json.data.fundedAmount 
+                               : "Unknown";
+                               
+                this.addLog(`Faucet: +${amount} DIAM`, 'success');
+                this.faucetClaimed = true; 
+                
+                this.lastClaimTime = Date.now();
+                if(accountData[this.address.toLowerCase()]) {
+                    accountData[this.address.toLowerCase()].lastClaimTime = this.lastClaimTime;
+                    saveAccountData();
+                }
+
+                await this.updateBalance();
+            } else {
+                const msg = faucetRes.json?.message || `Status ${faucetRes.status_code}`;
+                if(msg && msg.toLowerCase().includes("once per day")) {
+                    this.addLog("Faucet already claimed today.", "warn");
+                    this.faucetClaimed = true; 
+                    if (!this.lastClaimTime || this.lastClaimTime === 0) {
+                          this.lastClaimTime = Date.now();
+                          if(accountData[this.address.toLowerCase()]) {
+                            accountData[this.address.toLowerCase()].lastClaimTime = this.lastClaimTime;
+                            saveAccountData();
+                        }
+                    }
+                } else {
+                    this.addLog(`Faucet: ${msg}`, 'warn');
+                    this.faucetClaimed = false; 
+                }
             }
         }
         this.refreshDisplay();
@@ -956,19 +985,19 @@ function showReferralMenu(doClear = true) {
 
     const startBtn = blessed.button({ 
         parent: form, top: btnTop, left: 2, width: 10, height: 3, content: ' START ', 
-        style: { bg: 'green', fg: 'black', focus: { bg: 'white', fg: 'black' } }, // Turns white on select
+        style: { bg: 'green', fg: 'black', focus: { bg: 'white', fg: 'black' } }, 
         border: {type: 'line'} 
     });
     
     const stopBtn = blessed.button({ 
         parent: form, top: btnTop, left: 2, width: 10, height: 3, content: ' STOP ', 
-        style: { bg: 'red', fg: 'white', focus: { bg: 'white', fg: 'black' } }, // Turns white on select
+        style: { bg: 'red', fg: 'white', focus: { bg: 'white', fg: 'black' } }, 
         border: {type: 'line'}, hidden: true 
     });
     
     const backBtnRef = blessed.button({ 
         parent: form, top: btnTop, right: 2, width: 10, height: 3, content: ' BACK ', 
-        style: { bg: 'blue', fg: 'white', focus: { bg: 'white', fg: 'black' } }, // Turns white on select
+        style: { bg: 'blue', fg: 'white', focus: { bg: 'white', fg: 'black' } }, 
         border: {type: 'line'} 
     });
 
