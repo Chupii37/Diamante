@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import sys
 import json
 from curl_cffi import requests
@@ -10,31 +9,41 @@ def main():
         payload = json.loads(sys.argv[3]) if sys.argv[3] != "null" else None
         headers = json.loads(sys.argv[4])
         proxy = sys.argv[5] if len(sys.argv) > 5 and sys.argv[5] else None
+        
     except Exception as e:
         print(json.dumps({"error": f"invalid_args: {e}"}))
         return
 
-    s = requests.Session()
+    keys_to_remove = [k for k in headers.keys() if k.lower() == 'user-agent']
+    for k in keys_to_remove:
+        del headers[k]
 
-    kwargs = {
-        "headers": headers,
-        "impersonate": "chrome110",
-        "allow_redirects": True
-    }
+    impersonate = "safari15_5"
 
-    if proxy:
-        kwargs["proxies"] = {"http": proxy, "https": proxy}
+    proxies = {"http": proxy, "https": proxy} if proxy else None
 
     try:
-        if method == "GET":
-            r = s.get(url, **kwargs)
-        else:
-            r = s.post(url, json=payload, **kwargs)
+        req_kwargs = {
+            "method": method,
+            "url": url,
+            "headers": headers,
+            "proxies": proxies,
+            "impersonate": impersonate,
+            "timeout": 30
+        }
+
+        if payload:
+            req_kwargs["json"] = payload
+
+        r = requests.request(**req_kwargs)
+
+        is_html_block = "<html" in r.text.lower() and r.status_code == 403
+        response_text = "CLOUDFLARE_BLOCK_API" if is_html_block else r.text
 
         out = {
-            "status": r.status_code,
+            "status_code": r.status_code,
             "headers": dict(r.headers),
-            "text": r.text,
+            "text": response_text,
             "proxy_used": proxy
         }
 
@@ -44,8 +53,9 @@ def main():
             out["json"] = None
 
         print(json.dumps(out))
+
     except Exception as e:
-        print(json.dumps({"error": str(e), "proxy_used": proxy}))
+        print(json.dumps({"error": str(e), "status_code": 0, "proxy_used": proxy}))
 
 if __name__ == "__main__":
     main()
